@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   BookOpen, 
   Award, 
@@ -110,49 +110,77 @@ export default function App() {
   const [activeMathTopic, setActiveMathTopic] = useState<'algebra' | 'arithmetic' | 'word-problems' | 'number-properties' | 'rates-and-work' | 'ratios-and-percents' | 'statistics-and-data'>('algebra');
   const [mathDifficulty, setMathDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
 
-  // Track the number of solved questions per difficulty
-  const [mathDifficultySolved, setMathDifficultySolved] = useState<{ easy: number, medium: number, hard: number }>(() => {
-    const saved = localStorage.getItem('gmat_math_difficulty_solved');
+  // Unique map of solved question IDs: keys: questionID, values: { topic, difficulty }
+  const [mathSolvedQuestionsMap, setMathSolvedQuestionsMap] = useState<{ [id: string]: { topic: string, difficulty: string } }>(() => {
+    const saved = localStorage.getItem('gmat_math_solved_questions_map_v3');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved);
-        return {
-          easy: parsed.easy ?? 18,
-          medium: parsed.medium ?? 14,
-          hard: parsed.hard ?? 5
-        };
+        return JSON.parse(saved);
       } catch (e) {}
     }
-    return { easy: 18, medium: 14, hard: 5 };
+    // Migration helper: If we have legacy solved IDs list, convert them using baseline catalog matches
+    const map: { [id: string]: { topic: string, difficulty: string } } = {};
+    const legacySavedIds = localStorage.getItem('gmat_math_solved_question_ids_v2');
+    if (legacySavedIds) {
+      try {
+        const ids: string[] = JSON.parse(legacySavedIds);
+        ids.forEach(id => {
+          const matched = mockMathQuestions.find(q => q.id === id);
+          if (matched) {
+            map[id] = { topic: matched.topic, difficulty: (matched.difficulty || 'medium').toLowerCase() };
+          } else {
+            map[id] = { topic: 'algebra', difficulty: 'medium' };
+          }
+        });
+      } catch (e) {}
+    }
+    return map;
   });
-  
-  // Maths Progress - Solved question counts with goals of 40-50 per topic
-  const [mathCompletedCounts, setMathCompletedCounts] = useState<{ [topic: string]: number }>(() => {
-    const saved = localStorage.getItem('gmat_math_counts');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return {
-          'algebra': parsed.algebra ?? 15,
-          'arithmetic': parsed.arithmetic ?? 12,
-          'word-problems': parsed['word-problems'] ?? 8,
-          'number-properties': parsed['number-properties'] ?? 10,
-          'rates-and-work': parsed['rates-and-work'] ?? 7,
-          'ratios-and-percents': parsed['ratios-and-percents'] ?? 11,
-          'statistics-and-data': parsed['statistics-and-data'] ?? 6,
-        };
-      } catch (e) {}
-    }
-    return {
-      'algebra': 15,
-      'arithmetic': 12,
-      'word-problems': 8,
-      'number-properties': 10,
-      'rates-and-work': 7,
-      'ratios-and-percents': 11,
-      'statistics-and-data': 6,
+
+  // Dynamically compute solved counts per topic
+  const mathCompletedCounts = useMemo<{ [topic: string]: number }>(() => {
+    const counts: { [topic: string]: number } = {
+      'algebra': 0,
+      'arithmetic': 0,
+      'word-problems': 0,
+      'number-properties': 0,
+      'rates-and-work': 0,
+      'ratios-and-percents': 0,
+      'statistics-and-data': 0,
     };
-  });
+    Object.keys(mathSolvedQuestionsMap).forEach(id => {
+      const item = mathSolvedQuestionsMap[id];
+      if (item && counts[item.topic] !== undefined) {
+        counts[item.topic] += 1;
+      }
+    });
+    return counts;
+  }, [mathSolvedQuestionsMap]);
+
+  // Dynamically compute solved counts per difficulty
+  const mathDifficultySolved = useMemo<{ easy: number, medium: number, hard: number }>(() => {
+    const counts = { easy: 0, medium: 0, hard: 0 };
+    Object.keys(mathSolvedQuestionsMap).forEach(id => {
+      const item = mathSolvedQuestionsMap[id];
+      if (item) {
+        const diff = (item.difficulty || '').toLowerCase() as 'easy' | 'medium' | 'hard';
+        if (counts[diff] !== undefined) {
+          counts[diff] += 1;
+        }
+      }
+    });
+    return counts;
+  }, [mathSolvedQuestionsMap]);
+
+  // Track elapsed timer for the active math question
+  const [mathQuestionSeconds, setMathQuestionSeconds] = useState<number>(0);
+  const [isMathTimerRunning, setIsMathTimerRunning] = useState<boolean>(true);
+
+  // States for handling GMAT incorrect try & guide hints
+  const [mathFirstAttemptFailed, setMathFirstAttemptFailed] = useState<boolean>(false);
+  const [mathShowHint, setMathShowHint] = useState<boolean>(false);
+  const [mathRevealedSolution, setMathRevealedSolution] = useState<boolean>(false);
+  const [mathEliminatedOptions, setMathEliminatedOptions] = useState<number[]>([]);
 
   // Cached generated or loaded math questions (by topic) to save Gemini tokens
   const [topicMathQuestions, setTopicMathQuestions] = useState<{ [topic: string]: GmatMathQuestion[] }>(() => {
@@ -183,15 +211,29 @@ export default function App() {
     };
   });
 
-  // Currently loaded math question index for active topic
-  const [activeMathQuestionIndex, setActiveMathQuestionIndex] = useState<{ [topic: string]: number }>({
-    'algebra': 0,
-    'arithmetic': 0,
-    'word-problems': 0,
-    'number-properties': 0,
-    'rates-and-work': 0,
-    'ratios-and-percents': 0,
-    'statistics-and-data': 0,
+  // Segment question index per (topic + difficulty) combination to prevent leakage
+  const [activeMathQuestionIndex, setActiveMathQuestionIndex] = useState<{ [key: string]: number }>({
+    'algebra_easy': 0,
+    'algebra_medium': 0,
+    'algebra_hard': 0,
+    'arithmetic_easy': 0,
+    'arithmetic_medium': 0,
+    'arithmetic_hard': 0,
+    'word-problems_easy': 0,
+    'word-problems_medium': 0,
+    'word-problems_hard': 0,
+    'number-properties_easy': 0,
+    'number-properties_medium': 0,
+    'number-properties_hard': 0,
+    'rates-and-work_easy': 0,
+    'rates-and-work_medium': 0,
+    'rates-and-work_hard': 0,
+    'ratios-and-percents_easy': 0,
+    'ratios-and-percents_medium': 0,
+    'ratios-and-percents_hard': 0,
+    'statistics-and-data_easy': 0,
+    'statistics-and-data_medium': 0,
+    'statistics-and-data_hard': 0,
   });
 
   const [isGeneratingMath, setIsGeneratingMath] = useState<boolean>(false);
@@ -254,7 +296,7 @@ export default function App() {
   const totalMathQuestionsSolved = (Object.values(mathCompletedCounts) as number[]).reduce((a: number, b: number) => a + b, 0);
   const estimatedScore = calculateEstimatedGmatScore(stats, totalMathQuestionsSolved);
 
-  // Timer runner
+  // Timer runner for overall session
   useEffect(() => {
     let interval: any = null;
     if (isTimerRunning) {
@@ -275,26 +317,6 @@ export default function App() {
   const saveStats = (newStats: FriendGoalStats) => {
     localStorage.setItem('gmat_friend_stats', JSON.stringify(newStats));
     setStats(newStats);
-  };
-
-  // Save math counts
-  const updateMathCount = (topic: string, amount: number) => {
-    const updated = {
-      ...mathCompletedCounts,
-      [topic]: Math.max(0, Math.min(100, mathCompletedCounts[topic] + amount))
-    };
-    localStorage.setItem('gmat_math_counts', JSON.stringify(updated));
-    setMathCompletedCounts(updated);
-  };
-
-  // Save math difficulty counts
-  const updateMathDifficultyCount = (diff: 'easy' | 'medium' | 'hard', amount: number) => {
-    const updated = {
-      ...mathDifficultySolved,
-      [diff]: Math.max(0, mathDifficultySolved[diff] + amount)
-    };
-    localStorage.setItem('gmat_math_difficulty_solved', JSON.stringify(updated));
-    setMathDifficultySolved(updated);
   };
 
   // Select verbal passage
@@ -375,10 +397,25 @@ export default function App() {
 
   // ---------------- MATH ACTIONS ----------------
   const currentTopicQuestions = topicMathQuestions[activeMathTopic] || [];
-  const currentTopicIndex = activeMathQuestionIndex[activeMathTopic] || 0;
-  const currentMathQ = currentTopicQuestions[currentTopicIndex] || mockMathQuestions.find(q => q.topic === activeMathTopic) || mockMathQuestions[0];
+  const currentTopicDifficultyQuestions = currentTopicQuestions.filter(q => (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+  const currentTopicIndexKey = `${activeMathTopic}_${mathDifficulty}`;
+  const currentTopicIndex = activeMathQuestionIndex[currentTopicIndexKey] || 0;
+  
+  // If there's a cached matching question, we use it. Otherwise, currentMathQ is undefined.
+  const currentMathQ = currentTopicDifficultyQuestions[currentTopicIndex];
 
-  // Dynamic GMAT Mathematics Generation
+  // Timer runner for individual math questions (Quant pacing)
+  useEffect(() => {
+    let interval: any = null;
+    if (isMathTimerRunning && !isGeneratingMath && currentMathQ) {
+      interval = setInterval(() => {
+        setMathQuestionSeconds(s => s + 1);
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isMathTimerRunning, isGeneratingMath, currentMathQ]);
+
+  // Dynamic GMAT Mathematics Generation with auto-normalization of difficulty case
   const generateNewMathQuestion = async () => {
     setIsGeneratingMath(true);
     setMathError(null);
@@ -398,6 +435,13 @@ export default function App() {
       }
 
       const freshMathQ: GmatMathQuestion = await response.json();
+      freshMathQ.id = `math-ai-${Date.now()}`;
+      // Lowercase difficulty to guarantee strict client alignment
+      if (freshMathQ.difficulty) {
+        freshMathQ.difficulty = freshMathQ.difficulty.toLowerCase() as any;
+      } else {
+        freshMathQ.difficulty = mathDifficulty;
+      }
       
       // Update our catalog state & localStorage
       const updatedCatalog = { ...topicMathQuestions };
@@ -411,15 +455,24 @@ export default function App() {
       localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
       setTopicMathQuestions(updatedCatalog);
 
-      // Point the index to the newly generated question at the end
+      // Find relative index of new item in filtered list (case-insensitive)
+      const filteredList = updatedCatalog[activeMathTopic].filter(q => (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+      const newIndexInFiltered = filteredList.findIndex(q => q.id === freshMathQ.id);
+
       setActiveMathQuestionIndex({
         ...activeMathQuestionIndex,
-        [activeMathTopic]: updatedCatalog[activeMathTopic].length - 1
+        [currentTopicIndexKey]: newIndexInFiltered !== -1 ? newIndexInFiltered : 0
       });
 
       // Reset interaction
       setMathSelectedAnswer(null);
       setMathAnswerSubmitted(false);
+      setMathFirstAttemptFailed(false);
+      setMathShowHint(false);
+      setMathRevealedSolution(false);
+      setMathEliminatedOptions([]);
+      setMathQuestionSeconds(0);
+      setIsMathTimerRunning(true);
 
     } catch (err: any) {
       console.error(err);
@@ -429,75 +482,131 @@ export default function App() {
     }
   };
 
-  // Cycle Next Local Baseline Question (saves API cost!)
-  const cycleNextLocalMathQuestion = () => {
-    const list = mockMathQuestions.filter(q => q.topic === activeMathTopic);
-    if (list.length === 0) return;
+  // Load standard GMAT Focus syllabus offline baseline question matching current topic and difficulty
+  const loadBaselineForActiveTopicDifficulty = () => {
+    const baselineMatch = mockMathQuestions.find(q => q.topic === activeMathTopic && (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
     
-    // Find if we should inject next local question
-    const updatedCatalog = { ...topicMathQuestions };
-    if (!updatedCatalog[activeMathTopic]) {
-      updatedCatalog[activeMathTopic] = [];
-    }
-    
-    // Find next baseline question not in our local catalog list
-    const remainingBaselines = list.filter(bq => !updatedCatalog[activeMathTopic].some(q => q.id === bq.id));
-    
-    if (remainingBaselines.length > 0) {
-      updatedCatalog[activeMathTopic] = [...updatedCatalog[activeMathTopic], remainingBaselines[0]];
-      localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
-      setTopicMathQuestions(updatedCatalog);
+    if (baselineMatch) {
+      const updatedCatalog = { ...topicMathQuestions };
+      if (!updatedCatalog[activeMathTopic]) {
+        updatedCatalog[activeMathTopic] = [];
+      }
       
-      setActiveMathQuestionIndex({
-        ...activeMathQuestionIndex,
-        [activeMathTopic]: updatedCatalog[activeMathTopic].length - 1
-      });
-    } else {
-      // Loop around existing ones for this topic
-      const nextIdx = (currentTopicIndex + 1) % updatedCatalog[activeMathTopic].length;
-      setActiveMathQuestionIndex({
-        ...activeMathQuestionIndex,
-        [activeMathTopic]: nextIdx
-      });
-    }
+      // Inject if not already present
+      if (!updatedCatalog[activeMathTopic].some(q => q.id === baselineMatch.id)) {
+        updatedCatalog[activeMathTopic] = [...updatedCatalog[activeMathTopic], baselineMatch];
+        localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
+        setTopicMathQuestions(updatedCatalog);
+      }
 
-    setMathSelectedAnswer(null);
-    setMathAnswerSubmitted(false);
+      // Locate index in filtered difficulty list
+      const filteredList = updatedCatalog[activeMathTopic].filter(q => (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+      const matchedIdx = filteredList.findIndex(q => q.id === baselineMatch.id);
+
+      setActiveMathQuestionIndex({
+        ...activeMathQuestionIndex,
+        [currentTopicIndexKey]: matchedIdx !== -1 ? matchedIdx : 0
+      });
+
+      setMathSelectedAnswer(null);
+      setMathAnswerSubmitted(false);
+      setMathFirstAttemptFailed(false);
+      setMathShowHint(false);
+      setMathRevealedSolution(false);
+      setMathEliminatedOptions([]);
+      setMathQuestionSeconds(0);
+      setIsMathTimerRunning(true);
+    } else {
+      // Fallback: trigger AI model synthesis
+      generateNewMathQuestion();
+    }
   };
 
-  // Cycle Previous Math
+  // Cycle Previous Math matching active difficulty level
   const cyclePrevMathQuestion = () => {
-    const topicList = topicMathQuestions[activeMathTopic] || [];
-    if (topicList.length <= 1) return;
+    const list = (topicMathQuestions[activeMathTopic] || []).filter(q => (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+    if (list.length <= 1) return;
     
-    const prevIdx = (currentTopicIndex - 1 + topicList.length) % topicList.length;
+    const currentIndex = activeMathQuestionIndex[currentTopicIndexKey] || 0;
+    const prevIdx = (currentIndex - 1 + list.length) % list.length;
+    
     setActiveMathQuestionIndex({
       ...activeMathQuestionIndex,
-      [activeMathTopic]: prevIdx
+      [currentTopicIndexKey]: prevIdx
     });
     setMathSelectedAnswer(null);
     setMathAnswerSubmitted(false);
+    setMathFirstAttemptFailed(false);
+    setMathShowHint(false);
+    setMathRevealedSolution(false);
+    setMathEliminatedOptions([]);
+    setMathQuestionSeconds(0);
+    setIsMathTimerRunning(true);
   };
 
-  // Evaluate Math Answer
+  // Evaluate Math Answer with duplicate solve prevention & hint/retry mechanism
   const submitMathAnswer = () => {
-    if (mathSelectedAnswer === null) return;
-    setMathAnswerSubmitted(true);
+    if (mathSelectedAnswer === null || !currentMathQ) return;
 
     const isCorrect = mathSelectedAnswer === currentMathQ.correctAnswerIndex;
+    
     if (isCorrect) {
-      // Automatically increment solved count toward the 40-50 progress indicator!
-      updateMathCount(activeMathTopic, 1);
-      
-      // Increment difficulty solved metrics as well
-      updateMathDifficultyCount(currentMathQ.difficulty, 1);
-    }
+      // Correct solution submitted!
+      setMathAnswerSubmitted(true);
+      setMathRevealedSolution(true);
+      setIsMathTimerRunning(false); // Stop countdown
 
-    // Update global progress accuracy slightly
+      // Add to map of completed matching questions (strictly correct solves) to compute dynamic counts
+      if (!mathSolvedQuestionsMap[currentMathQ.id]) {
+        const updatedMap = {
+          ...mathSolvedQuestionsMap,
+          [currentMathQ.id]: {
+            topic: activeMathTopic,
+            difficulty: (currentMathQ.difficulty || mathDifficulty).toLowerCase()
+          }
+        };
+        setMathSolvedQuestionsMap(updatedMap);
+        localStorage.setItem('gmat_math_solved_questions_map_v3', JSON.stringify(updatedMap));
+      }
+
+      // Update global progress accuracy metrics
+      const totalAns = stats.questionsAnswered + 1;
+      const prevCorrect = Math.round((stats.accuracy / 100) * stats.questionsAnswered);
+      const newCorrectCount = prevCorrect + 1;
+      const newAccuracy = Math.round((newCorrectCount / totalAns) * 100);
+
+      saveStats({
+        ...stats,
+        questionsAnswered: totalAns,
+        accuracy: newAccuracy
+      });
+    } else {
+      // Incorrect solution submitted. Store chosen option index in eliminated array
+      if (!mathEliminatedOptions.includes(mathSelectedAnswer)) {
+        setMathEliminatedOptions([...mathEliminatedOptions, mathSelectedAnswer]);
+      }
+      
+      // Trigger hint & double eligibility
+      setMathFirstAttemptFailed(true);
+      setMathShowHint(true);
+    }
+  };
+
+  const resetForAnotherAttempt = () => {
+    setMathSelectedAnswer(null);
+    setMathShowHint(false);
+  };
+
+  const revealMathAnswerAndSolution = () => {
+    if (!currentMathQ) return;
+    setMathAnswerSubmitted(true);
+    setMathRevealedSolution(true);
+    setIsMathTimerRunning(false); // Stop countdown
+
+    // Revealed without solving correctly - calculate standard attempt metric
     const totalAns = stats.questionsAnswered + 1;
     const prevCorrect = Math.round((stats.accuracy / 100) * stats.questionsAnswered);
-    const newCorrectCount = isCorrect ? prevCorrect + 1 : prevCorrect;
-    const newAccuracy = Math.round((newCorrectCount / totalAns) * 100);
+    const newAccuracy = Math.round((prevCorrect / totalAns) * 100);
 
     saveStats({
       ...stats,
@@ -508,42 +617,51 @@ export default function App() {
 
   // Handle moving to the next question of the currently selected difficulty
   const goToNextMathQuestion = () => {
-    const list = topicMathQuestions[activeMathTopic] || [];
-    
-    // Find all indices of the current topic questions that match the selected mathDifficulty
-    const matchingIndices = list
-      .map((q, idx) => ({ q, idx }))
-      .filter(item => item.q.difficulty === mathDifficulty);
+    const list = (topicMathQuestions[activeMathTopic] || []).filter(q => (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+    const currentIndex = activeMathQuestionIndex[currentTopicIndexKey] || 0;
 
-    // Look for a matching question whose index is GREATER than currentTopicIndex
-    const nextItem = matchingIndices.find(item => item.idx > currentTopicIndex);
-
-    if (nextItem) {
+    if (list.length > 0 && currentIndex < list.length - 1) {
       setActiveMathQuestionIndex({
         ...activeMathQuestionIndex,
-        [activeMathTopic]: nextItem.idx
+        [currentTopicIndexKey]: currentIndex + 1
       });
       setMathSelectedAnswer(null);
       setMathAnswerSubmitted(false);
+      setMathFirstAttemptFailed(false);
+      setMathShowHint(false);
+      setMathRevealedSolution(false);
+      setMathEliminatedOptions([]);
+      setMathQuestionSeconds(0);
+      setIsMathTimerRunning(true);
     } else {
-      // No more cached questions of this difficulty further down. Let's see if there is any offline baseline question of this topic & difficulty we haven't seen yet.
-      const offlineBaselines = mockMathQuestions.filter(q => q.topic === activeMathTopic && q.difficulty === mathDifficulty);
-      const unusedBaseline = offlineBaselines.find(bq => !list.some(q => q.id === bq.id));
+      // Find unused baseline of matching topic & difficulty
+      const offlineBaselines = mockMathQuestions.filter(q => q.topic === activeMathTopic && (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+      const currentCatalog = topicMathQuestions[activeMathTopic] || [];
+      const unusedBaseline = offlineBaselines.find(bq => !currentCatalog.some(q => q.id === bq.id));
 
       if (unusedBaseline) {
         const updatedCatalog = { ...topicMathQuestions };
-        updatedCatalog[activeMathTopic] = [...(updatedCatalog[activeMathTopic] || []), unusedBaseline];
+        updatedCatalog[activeMathTopic] = [...currentCatalog, unusedBaseline];
         localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
         setTopicMathQuestions(updatedCatalog);
 
+        const filteredList = updatedCatalog[activeMathTopic].filter(q => (q.difficulty || '').toLowerCase() === mathDifficulty.toLowerCase());
+        const newIndexInFiltered = filteredList.findIndex(q => q.id === unusedBaseline.id);
+
         setActiveMathQuestionIndex({
           ...activeMathQuestionIndex,
-          [activeMathTopic]: updatedCatalog[activeMathTopic].length - 1
+          [currentTopicIndexKey]: newIndexInFiltered !== -1 ? newIndexInFiltered : 0
         });
         setMathSelectedAnswer(null);
         setMathAnswerSubmitted(false);
+        setMathFirstAttemptFailed(false);
+        setMathShowHint(false);
+        setMathRevealedSolution(false);
+        setMathEliminatedOptions([]);
+        setMathQuestionSeconds(0);
+        setIsMathTimerRunning(true);
       } else {
-        // No match found anywhere, let's trigger a dynamic AI generation of the selected difficulty level!
+        // Trigger AI dynamic question generation
         generateNewMathQuestion();
       }
     }
@@ -1423,8 +1541,7 @@ export default function App() {
 
           </div>
         )}
-
-        {/* TAB 2: PROGRESSIVE QUANT PRACTICE (MATHS) */}
+           {/* TAB 2: PROGRESSIVE QUANT PRACTICE (MATHS) */}
         {navigationTab === 'maths' && (
           <div className="space-y-6">
             
@@ -1452,7 +1569,7 @@ export default function App() {
                       setMathSelectedAnswer(null);
                       setMathAnswerSubmitted(false);
                     }}
-                    className={`text-left p-4 rounded-2xl border transition-all duration-150 cursor-pointer ${isActive ? 'bg-white border-indigo-650 ring-2 ring-indigo-50 shadow-sm' : 'bg-white hover:bg-slate-100 border-slate-200'}`}
+                    className={`text-left p-4 rounded-2xl border transition-all duration-150 cursor-pointer ${isActive ? 'bg-white border-indigo-600 ring-2 ring-indigo-550/10 shadow-sm' : 'bg-white hover:bg-slate-105 border-slate-200'}`}
                   >
                     <div className="flex justify-between items-center text-[10px] font-mono text-slate-400 uppercase font-bold mb-1">
                       <span className="truncate max-w-[120px]">{topic.replace(/-/g, ' ')}</span>
@@ -1475,13 +1592,11 @@ export default function App() {
                       ></div>
                     </div>
 
-                    {/* Solved Adjuster buttons */}
+                    {/* Dynamic Auto-calculated Solved Details */}
                     <div className="flex justify-between items-center text-[11px]" onClick={e => e.stopPropagation()}>
                       <span className="text-slate-400 font-bold font-mono">{percentage.toFixed(0)}% Complete</span>
-                      <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5">
-                        <button onClick={() => updateMathCount(topic, -1)} className="hover:text-red-600 px-0.5 text-[10px] font-bold">-</button>
-                        <span className="font-semibold text-slate-700 font-mono px-1">{solved}</span>
-                        <button onClick={() => updateMathCount(topic, 1)} className="hover:text-emerald-700 px-0.5 text-[10px] font-bold">+</button>
+                      <div className="flex items-center gap-1 bg-slate-50 border border-slate-155 rounded px-2 py-0.5">
+                        <span className="font-semibold text-indigo-705 font-mono text-[10px]">{solved} solved</span>
                       </div>
                     </div>
                   </button>
@@ -1516,37 +1631,10 @@ export default function App() {
                             key={diff}
                             onClick={() => {
                               setMathDifficulty(diff);
-                              // Smart catalog switching inside current active math topic
-                              const list = topicMathQuestions[activeMathTopic] || [];
-                              const matchedIdx = list.findIndex(q => q.difficulty === diff);
-                              if (matchedIdx !== -1) {
-                                setActiveMathQuestionIndex({
-                                  ...activeMathQuestionIndex,
-                                  [activeMathTopic]: matchedIdx
-                                });
-                              } else {
-                                // Try finding a baseline matching topic & difficulty
-                                const baselineMatchIdx = mockMathQuestions.findIndex(q => q.topic === activeMathTopic && q.difficulty === diff);
-                                if (baselineMatchIdx !== -1) {
-                                  const matchingQ = mockMathQuestions[baselineMatchIdx];
-                                  const updatedCatalog = { ...topicMathQuestions };
-                                  if (!updatedCatalog[activeMathTopic]) updatedCatalog[activeMathTopic] = [];
-                                  if (!updatedCatalog[activeMathTopic].some(x => x.id === matchingQ.id)) {
-                                    updatedCatalog[activeMathTopic] = [...updatedCatalog[activeMathTopic], matchingQ];
-                                    localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
-                                    setTopicMathQuestions(updatedCatalog);
-                                  }
-                                  const newIdx = updatedCatalog[activeMathTopic].findIndex(x => x.id === matchingQ.id);
-                                  setActiveMathQuestionIndex({
-                                    ...activeMathQuestionIndex,
-                                    [activeMathTopic]: newIdx !== -1 ? newIdx : updatedCatalog[activeMathTopic].length - 1
-                                  });
-                                }
-                              }
                               setMathSelectedAnswer(null);
                               setMathAnswerSubmitted(false);
                             }}
-                            className={`py-2 px-1 rounded-xl border transition-all cursor-pointer flex flex-col items-center justify-center gap-0.5 text-center ${isChosen ? 'bg-indigo-650 text-white border-indigo-650 shadow-sm ring-2 ring-indigo-50 font-bold' : 'bg-white border-slate-200 text-slate-655 hover:bg-slate-100'}`}
+                            className={`py-2 px-1 rounded-xl border transition-all cursor-pointer flex flex-col items-center justify-center gap-0.5 text-center ${isChosen ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm ring-2 ring-indigo-50 font-bold' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'}`}
                           >
                             <span className="text-[11px] uppercase tracking-wide block font-extrabold">{diff}</span>
                             <span className={`text-[9px] font-mono block ${isChosen ? 'text-indigo-200' : 'text-slate-400'}`}>
@@ -1557,24 +1645,10 @@ export default function App() {
                       })}
                     </div>
                     
-                    {/* Manual Difficulty counters adjuster */}
-                    <div className="flex items-center justify-between text-[10px] bg-white p-2 rounded-xl border border-slate-200/60 select-none">
-                      <span className="text-slate-450 font-mono font-bold uppercase tracking-wider text-[8px]">ADJUST {mathDifficulty}:</span>
-                      <div className="flex items-center gap-1">
-                        <div className="flex items-center bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5">
-                          <button 
-                            onClick={() => updateMathDifficultyCount(mathDifficulty, -1)} 
-                            className="hover:text-red-650 px-1 font-bold text-[10px] cursor-pointer"
-                            title={`Decrease ${mathDifficulty} solved count`}
-                          >-</button>
-                          <span className="font-bold text-slate-800 font-mono px-1.5">{mathDifficultySolved[mathDifficulty]}</span>
-                          <button 
-                            onClick={() => updateMathDifficultyCount(mathDifficulty, 1)} 
-                            className="hover:text-emerald-700 px-1 font-bold text-[10px] cursor-pointer"
-                            title={`Increase ${mathDifficulty} solved count`}
-                          >+</button>
-                        </div>
-                      </div>
+                    {/* Automatic Difficulty stats */}
+                    <div className="flex items-center justify-between text-[11px] bg-indigo-50/50 p-2.5 rounded-xl border border-indigo-100/60 select-none">
+                      <span className="text-indigo-850 font-bold uppercase tracking-wider text-[9px] font-mono">Current {mathDifficulty} Level:</span>
+                      <span className="font-bold text-indigo-900 font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-indigo-100 shadow-3xs">{mathDifficultySolved[mathDifficulty]} Solved</span>
                     </div>
 
                     <span className="text-[10px] text-slate-400 leading-normal block italic">Highly recommended: complete 40+ easy and medium before scaling hard breakout. Solved questions update counts automatically.</span>
@@ -1582,15 +1656,19 @@ export default function App() {
 
                   <hr className="border-slate-200" />
 
-                  {/* Caching / Cost explanation cards */}
+                  {/* Caching & Question Source System explanation */}
                   <div className="bg-indigo-50/50 rounded-xl border border-indigo-100 p-4 space-y-2 text-xs text-slate-655 font-mono">
                     <div className="flex items-center gap-1.5 text-indigo-900 font-bold text-[10px] uppercase tracking-wide">
                       <BookOpenCheck className="w-4 h-4 text-indigo-700" />
-                      Efficient caching model
+                      COACHING SYLLABUS & SOURCES
                     </div>
                     <p className="text-[11px] leading-relaxed">
-                      We locally cache your practicing questions and answers to save Gemini API costs! Click <strong>"Generate Dynamic Math Question"</strong> to fetch a brand-new customized problem, or click <strong>"Practice Another Baseline Question"</strong> to cycle baseline questions instantly for free!
+                      To optimize learning and minimize API overhead, GMAT Elite provides two practice options:
                     </p>
+                    <ul className="text-[10px] list-disc list-inside space-y-1 text-slate-500 pl-1">
+                      <li><strong className="text-slate-750">Local Baseline Questions:</strong> Offline curated problems directly from GMAT syllabus logic. Instantly loadable without internet or AI quota overhead.</li>
+                      <li><strong className="text-slate-750">Dynamic AI Questions:</strong> Fully customized, freshly synthesized GMAT Focus problems generated live for you by Gemini 3.5 Flash.</li>
+                    </ul>
                   </div>
                 </div>
 
@@ -1616,12 +1694,45 @@ export default function App() {
                 {isGeneratingMath ? (
                   <div className="py-24 text-center space-y-3 flex flex-col items-center justify-center animate-fadeIn">
                     <div className="relative">
-                      <div className="w-12 h-12 border-4 border-indigo-650 border-t-transparent rounded-full animate-spin" />
-                      <Brain className="w-5 h-5 text-indigo-650 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2" />
+                      <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin" />
+                      <Brain className="w-5 h-5 text-indigo-600 absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2" />
                     </div>
                     <div className="space-y-1">
-                      <h4 className="text-sm font-bold text-slate-805 font-mono">Synthesizing Fresh Quant Question...</h4>
-                      <p className="text-xs text-slate-450 uppercase tracking-widest font-mono">Model: Gemini 3.5 Flash</p>
+                      <h4 className="text-sm font-bold text-slate-800 font-mono">Synthesizing Fresh Quant Question...</h4>
+                      <p className="text-xs text-slate-400 uppercase tracking-widest font-mono">Model: Gemini 3.5 Flash</p>
+                    </div>
+                  </div>
+                ) : !currentMathQ ? (
+                  <div className="py-16 px-6 text-center space-y-6 flex flex-col items-center justify-center animate-fadeIn">
+                    <div className="w-16 h-16 bg-indigo-50 border border-indigo-100 rounded-full flex items-center justify-center text-indigo-600 mx-auto shadow-sm">
+                      <Sparkles className="w-8 h-8 text-indigo-600 animate-pulse" />
+                    </div>
+                    
+                    <div className="space-y-2 max-w-sm">
+                      <h4 className="text-base font-bold text-slate-805 font-display">No {mathDifficulty} Question Available</h4>
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        There are no cached {mathDifficulty} GMAT Focus {activeMathTopic.replace(/-/g, ' ')} questions. Press below to generate a new custom-targeted question with Gemini AI, or load an offline baseline question.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row gap-3 w-full max-w-md justify-center">
+                      <button
+                        onClick={generateNewMathQuestion}
+                        className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-sm hover:shadow transition-all"
+                        title="Generate a brand-new custom AI question for this specific topic and difficulty level using Gemini"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Generate AI Question</span>
+                      </button>
+                      
+                      <button
+                        onClick={loadBaselineForActiveTopicDifficulty}
+                        className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs hover:shadow transition-all"
+                        title="Load a standard offline GMAT syllabus baseline question matching this topic and difficulty"
+                      >
+                        <BookOpenCheck className="w-3.5 h-3.5" />
+                        <span>Load Baseline Question</span>
+                      </button>
                     </div>
                   </div>
                 ) : (
@@ -1630,13 +1741,18 @@ export default function App() {
                     <div className="space-y-4">
                       
                       {/* Section header info */}
-                      <div className="flex justify-between items-center text-[10px] font-mono select-none border-b border-slate-100 pb-2.5">
-                        <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md font-bold uppercase">
-                          GMAT PROBLEM SOLVING • {activeMathTopic.replace('-', ' ')}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          <span className="text-slate-500">Source: <strong className="text-slate-800 uppercase text-[11px]">{currentMathQ.id.startsWith('math-') ? 'Local Baseline' : 'Gemini AI'}</strong></span>
-                          <span className="bg-slate-205 text-slate-700 px-2 py-0.5 rounded uppercase font-bold">Difficulty: {currentMathQ.difficulty}</span>
+                      <div className="flex justify-between items-start sm:items-center flex-col sm:flex-row gap-2 text-[10px] font-mono select-none border-b border-slate-100 pb-2.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md font-bold uppercase">
+                            GMAT PROBLEM SOLVING • {activeMathTopic.replace('-', ' ')}
+                          </span>
+                          <span className="bg-amber-50 text-amber-800 border border-amber-200/60 px-2 py-0.5 rounded font-mono font-bold flex items-center gap-1 animate-pulse" title="Question elapsed timer (pacing target: under 2:00)">
+                            ⏱️ {Math.floor(mathQuestionSeconds / 60)}:{(mathQuestionSeconds % 60).toString().padStart(2, '0')}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap text-[11px]">
+                          <span className="text-slate-500">Source: <strong className="text-slate-800 uppercase text-[10px]">{currentMathQ.id.startsWith('math-ai') || currentMathQ.id.startsWith('gen-') ? 'Gemini AI' : 'Local Baseline'}</strong></span>
+                          <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded uppercase font-bold text-[9px] border border-slate-200/80">Difficulty: {currentMathQ.difficulty}</span>
                         </div>
                       </div>
 
@@ -1652,9 +1768,11 @@ export default function App() {
                         {currentMathQ.options.map((optionText, oIdx) => {
                           const optionChar = String.fromCharCode(65 + oIdx);
                           const isSelected = mathSelectedAnswer === oIdx;
+                          const isEliminated = mathEliminatedOptions.includes(oIdx);
 
-                          let s = "border-slate-200 bg-white hover:bg-slate-50 cursor-pointer";
+                          let s = "border-slate-205 bg-white hover:bg-slate-50 cursor-pointer";
                           if (isSelected) s = "border-indigo-600 bg-indigo-50/50 ring-2 ring-indigo-100 font-bold";
+                          if (isEliminated) s = "border-rose-200 bg-rose-50/30 text-rose-700 line-through opacity-85 hover:bg-rose-50/30 cursor-pointer";
                           if (mathAnswerSubmitted) {
                             if (oIdx === currentMathQ.correctAnswerIndex) {
                               s = "border-emerald-500 bg-emerald-50 text-emerald-950 font-bold";
@@ -1669,13 +1787,13 @@ export default function App() {
                             <button
                               key={oIdx}
                               onClick={() => {
-                                if (mathAnswerSubmitted) return;
+                                if (mathAnswerSubmitted || mathShowHint) return;
                                 setMathSelectedAnswer(oIdx);
                               }}
-                              disabled={mathAnswerSubmitted}
-                              className={`text-left p-3 rounded-lg border flex items-start gap-3 text-xs transition-colors ${s}`}
+                              disabled={mathAnswerSubmitted || mathShowHint}
+                              className={`text-left p-3 rounded-lg border flex items-start gap-3 text-xs transition-with-all ${s}`}
                             >
-                              <span className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 border text-[10px] uppercase font-mono font-bold ${isSelected ? 'bg-indigo-600 text-white border-indigo-650' : 'bg-slate-100 border-slate-300 text-slate-650'}`}>
+                              <span className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 border text-[10px] uppercase font-mono font-bold ${isSelected ? 'bg-indigo-600 text-white border-indigo-650' : isEliminated ? 'bg-rose-100 border-rose-300 text-rose-600' : 'bg-slate-100 border-slate-300 text-slate-650'}`}>
                                 {optionChar}
                               </span>
                               <span className="leading-tight">{optionText}</span>
@@ -1684,8 +1802,42 @@ export default function App() {
                         })}
                       </div>
 
+                      {/* Hint & Retry Section */}
+                      {mathShowHint && !mathAnswerSubmitted && (
+                        <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-4 text-xs space-y-3 animate-slide select-text">
+                          <div className="flex items-center gap-1.5 text-amber-850 font-bold font-sans">
+                            <Lightbulb className="w-4 h-4 text-amber-600 animate-bounce" />
+                            <span>❌ Not quite right! Here is a GMAT Hint:</span>
+                          </div>
+
+                          <div className="bg-white/80 p-3 rounded-lg border border-amber-100/70 text-slate-700 leading-relaxed font-sans">
+                            <strong className="text-slate-800 text-[10px] uppercase tracking-wider block mb-1 font-mono">Conceptual Hint Guidance:</strong>
+                            <p className="italic">
+                              {currentMathQ.strategy || "Carefully review the constraints on variables, simplify expressions, or test convenient values to eliminate incorrect options."}
+                            </p>
+                          </div>
+
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <button
+                              onClick={resetForAnotherAttempt}
+                              className="flex-1 py-2 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                              title="Dismiss hint, select another answer, and try solving again"
+                            >
+                              <span>Try Option Again</span>
+                            </button>
+                            <button
+                              onClick={revealMathAnswerAndSolution}
+                              className="flex-1 py-2 px-3 bg-slate-205 hover:bg-slate-300 text-slate-800 border border-slate-300 font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                              title="Show correct answer and definitive step-by-step solution"
+                            >
+                              <span>Show Answer & Solution</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Evaluator trigger */}
-                      {!mathAnswerSubmitted && (
+                      {!mathAnswerSubmitted && !mathShowHint && (
                         <button
                           onClick={submitMathAnswer}
                           disabled={mathSelectedAnswer === null}
@@ -1711,12 +1863,12 @@ export default function App() {
                         <div className="bg-white border border-slate-200 rounded-xl p-4 text-xs space-y-3.5 animate-slide select-text">
                           <div className="flex items-center gap-1">
                             {mathSelectedAnswer === currentMathQ.correctAnswerIndex ? (
-                              <span className="bg-emerald-100 text-emerald-800 text-[9px] font-mono font-bold px-2 py-0.5 rounded-md flex items-center gap-1">
-                                <CheckCircle2 className="w-3 h-3" /> Correct Solution: +1 Solved Counted
+                              <span className="bg-emerald-100 text-emerald-800 text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-lg flex items-center gap-1 border border-emerald-200">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 animate-pulse" /> Correct Solution: +1 Solved Counted
                               </span>
                             ) : (
-                              <span className="bg-rose-100 text-rose-800 text-[9px] font-mono font-bold px-2 py-0.5 rounded-md flex items-center gap-1">
-                                <XCircle className="w-3 h-3" /> Incorrect Solution
+                              <span className="bg-rose-100 text-rose-800 text-[10px] font-mono font-bold px-2.5 py-0.5 rounded-lg flex items-center gap-1 border border-rose-200">
+                                <XCircle className="w-3.5 h-3.5 text-rose-600" /> Solver Revealed
                               </span>
                             )}
                           </div>
@@ -1749,27 +1901,34 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* Dynamic Controllers Block (Generate Question, Next baseline, complete mark) */}
-                      <div className="flex flex-col sm:flex-row gap-2 border-t border-slate-205/80 pt-4">
+                      {/* Dynamic GMAT Control Blocks describing action functions explicitly */}
+                      <div className="flex flex-col sm:flex-row gap-2.5 border-t border-slate-200 pt-4 mt-auto">
                         <button
                           onClick={generateNewMathQuestion}
                           disabled={isGeneratingMath}
-                          className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40"
+                          className="flex-1 py-2 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 transition-all shadow-sm"
+                          title="Generate a brand-new custom GMAT Focus question for this specific topic and difficulty level using Gemini AI"
                         >
                           <Sparkles className="w-3.5 h-3.5" />
-                          <span>🔄 Generate Dynamic Math Question</span>
+                          <span>🔄 Generate AI Math Problem ({mathDifficulty})</span>
                         </button>
                         
                         <button
-                          onClick={cycleNextLocalMathQuestion}
-                          className="flex-1 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                          onClick={loadBaselineForActiveTopicDifficulty}
+                          className="flex-1 py-2 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+                          title="Load a standard offline GMAT syllabus baseline question matching this topic and difficulty"
                         >
-                          <span>Practice baseline Question</span>
+                          <BookOpenCheck className="w-3.5 h-3.5 text-slate-600" />
+                          <span>Load Baseline Focus Question</span>
                         </button>
 
-                        {currentTopicQuestions.length > 1 && (
-                          <div className="flex items-center gap-1 shrink-0 bg-slate-100 p-0.5 rounded-lg select-none">
-                            <button onClick={cyclePrevMathQuestion} className="hover:bg-white text-[10px] font-serif font-bold px-2.5 py-1 rounded transition-all text-slate-650 cursor-pointer">
+                        {currentTopicDifficultyQuestions.length > 1 && (
+                          <div className="flex items-center gap-1 shrink-0 bg-slate-100 p-0.5 rounded-xl select-none">
+                            <button 
+                              onClick={cyclePrevMathQuestion} 
+                              className="hover:bg-white text-[10px] font-sans font-bold px-3 py-1.5 rounded-lg transition-all text-slate-600 cursor-pointer"
+                              title="Navigate back to previous cached question of this difficulty"
+                            >
                               &lt; Back
                             </button>
                           </div>
