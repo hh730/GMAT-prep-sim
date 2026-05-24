@@ -184,33 +184,57 @@ app.post('/api/chatbot-query', async (req, res) => {
       tools?: Array<{ googleSearch: {} }>;
     }
 
-    const config: GenConfig = {
-      systemInstruction,
-    };
+    let response: any = null;
+    let fallbackWarning = '';
+    let searchLinks: any[] = [];
 
     if (type === 'search') {
-      config.tools = [{ googleSearch: {} }];
+      try {
+        const config: GenConfig = {
+          systemInstruction,
+          tools: [{ googleSearch: {} }],
+        };
+        response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: userPrompt,
+          config,
+        });
+        
+        // Extract grounding URLs only if successful
+        const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+        if (groundingChunks) {
+          searchLinks = groundingChunks.map((chunk: any) => {
+            if (chunk.web) {
+              return {
+                title: chunk.web.title,
+                uri: chunk.web.uri
+              };
+            }
+            return null;
+          }).filter(Boolean);
+        }
+      } catch (searchErr: any) {
+        console.warn('Google Search Grounding tool failed. Falling back to core Gemini tutoring:', searchErr.message || searchErr);
+        fallbackWarning = "> ⚠️ *Note: Web Grounding is currently unavailable on this API key's tier/quota, so I have answered using standard analytical reasoning and context clues.*\n\n";
+      }
     }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: userPrompt,
-      config,
-    });
+    // Standard Gemini core fallback or standard query without search
+    if (!response) {
+      const config: GenConfig = {
+        systemInstruction,
+      };
+      response = await ai.models.generateContent({
+        model: 'gemini-3.5-flash',
+        contents: userPrompt,
+        config,
+      });
+    }
 
-    const text = response.text || "I was unable to construct an explanation. Please try asking again.";
-    
-    // Extract grounding URLs
-    const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    const searchLinks = groundingChunks ? groundingChunks.map((chunk: any) => {
-      if (chunk.web) {
-        return {
-          title: chunk.web.title,
-          uri: chunk.web.uri
-        };
-      }
-      return null;
-    }).filter(Boolean) : [];
+    let text = response.text || "I was unable to construct an explanation. Please try asking again.";
+    if (fallbackWarning) {
+      text = fallbackWarning + text;
+    }
 
     res.json({
       text,

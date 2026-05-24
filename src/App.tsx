@@ -480,7 +480,14 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error('Server returned error while consulting tutor.');
+        let errMsg = 'Server returned error while consulting tutor.';
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errMsg = errData.error;
+          }
+        } catch (_) {}
+        throw new Error(errMsg);
       }
 
       const data = await response.json();
