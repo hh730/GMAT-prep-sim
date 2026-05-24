@@ -1,0 +1,6 @@
+{
+  "name": "GMAT Science Prep",
+  "description": "Interactive GMAT science passage learning app centered on biology, physics, and astronomy to help raise GMAT scores from 605 to 705.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
