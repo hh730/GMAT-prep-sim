@@ -31,7 +31,8 @@ import {
   PlusCircle,
   MinusCircle,
   HelpCircle as MathIcon,
-  BookOpenCheck
+  BookOpenCheck,
+  ArrowRight
 } from 'lucide-react';
 import { defaultPassages } from './data/defaultPassages';
 import { GmatPassage, GmatQuestion, FriendGoalStats } from './types';
@@ -106,22 +107,50 @@ export default function App() {
   const [isTimerRunning, setIsTimerRunning] = useState(true);
 
   // ---------------- GMAT MATHS QUANT PRACTICE STATES ----------------
-  const [activeMathTopic, setActiveMathTopic] = useState<'algebra' | 'arithmetic' | 'word-problems' | 'number-properties'>('algebra');
+  const [activeMathTopic, setActiveMathTopic] = useState<'algebra' | 'arithmetic' | 'word-problems' | 'number-properties' | 'rates-and-work' | 'ratios-and-percents' | 'statistics-and-data'>('algebra');
   const [mathDifficulty, setMathDifficulty] = useState<'easy' | 'medium' | 'hard'>('medium');
+
+  // Track the number of solved questions per difficulty
+  const [mathDifficultySolved, setMathDifficultySolved] = useState<{ easy: number, medium: number, hard: number }>(() => {
+    const saved = localStorage.getItem('gmat_math_difficulty_solved');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return {
+          easy: parsed.easy ?? 18,
+          medium: parsed.medium ?? 14,
+          hard: parsed.hard ?? 5
+        };
+      } catch (e) {}
+    }
+    return { easy: 18, medium: 14, hard: 5 };
+  });
   
   // Maths Progress - Solved question counts with goals of 40-50 per topic
   const [mathCompletedCounts, setMathCompletedCounts] = useState<{ [topic: string]: number }>(() => {
     const saved = localStorage.getItem('gmat_math_counts');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        return {
+          'algebra': parsed.algebra ?? 15,
+          'arithmetic': parsed.arithmetic ?? 12,
+          'word-problems': parsed['word-problems'] ?? 8,
+          'number-properties': parsed['number-properties'] ?? 10,
+          'rates-and-work': parsed['rates-and-work'] ?? 7,
+          'ratios-and-percents': parsed['ratios-and-percents'] ?? 11,
+          'statistics-and-data': parsed['statistics-and-data'] ?? 6,
+        };
       } catch (e) {}
     }
     return {
       'algebra': 15,
       'arithmetic': 12,
       'word-problems': 8,
-      'number-properties': 10
+      'number-properties': 10,
+      'rates-and-work': 7,
+      'ratios-and-percents': 11,
+      'statistics-and-data': 6,
     };
   });
 
@@ -130,17 +159,28 @@ export default function App() {
     const saved = localStorage.getItem('gmat_math_catalog');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        return {
+          'algebra': parsed.algebra || [mockMathQuestions[0]],
+          'arithmetic': parsed.arithmetic || [mockMathQuestions[1]],
+          'word-problems': parsed['word-problems'] || [mockMathQuestions[2]],
+          'number-properties': parsed['number-properties'] || [mockMathQuestions[3]],
+          'rates-and-work': parsed['rates-and-work'] || [mockMathQuestions[4]],
+          'ratios-and-percents': parsed['ratios-and-percents'] || [mockMathQuestions[5]],
+          'statistics-and-data': parsed['statistics-and-data'] || [mockMathQuestions[6]],
+        };
       } catch (e) {}
     }
     // Prepopulate with offline baselines
-    const baseline: { [topic: string]: GmatMathQuestion[] } = {
+    return {
       'algebra': [mockMathQuestions[0]],
       'arithmetic': [mockMathQuestions[1]],
       'word-problems': [mockMathQuestions[2]],
-      'number-properties': [mockMathQuestions[3]]
+      'number-properties': [mockMathQuestions[3]],
+      'rates-and-work': [mockMathQuestions[4]],
+      'ratios-and-percents': [mockMathQuestions[5]],
+      'statistics-and-data': [mockMathQuestions[6]],
     };
-    return baseline;
   });
 
   // Currently loaded math question index for active topic
@@ -148,7 +188,10 @@ export default function App() {
     'algebra': 0,
     'arithmetic': 0,
     'word-problems': 0,
-    'number-properties': 0
+    'number-properties': 0,
+    'rates-and-work': 0,
+    'ratios-and-percents': 0,
+    'statistics-and-data': 0,
   });
 
   const [isGeneratingMath, setIsGeneratingMath] = useState<boolean>(false);
@@ -242,6 +285,16 @@ export default function App() {
     };
     localStorage.setItem('gmat_math_counts', JSON.stringify(updated));
     setMathCompletedCounts(updated);
+  };
+
+  // Save math difficulty counts
+  const updateMathDifficultyCount = (diff: 'easy' | 'medium' | 'hard', amount: number) => {
+    const updated = {
+      ...mathDifficultySolved,
+      [diff]: Math.max(0, mathDifficultySolved[diff] + amount)
+    };
+    localStorage.setItem('gmat_math_difficulty_solved', JSON.stringify(updated));
+    setMathDifficultySolved(updated);
   };
 
   // Select verbal passage
@@ -435,6 +488,9 @@ export default function App() {
     if (isCorrect) {
       // Automatically increment solved count toward the 40-50 progress indicator!
       updateMathCount(activeMathTopic, 1);
+      
+      // Increment difficulty solved metrics as well
+      updateMathDifficultyCount(currentMathQ.difficulty, 1);
     }
 
     // Update global progress accuracy slightly
@@ -448,6 +504,49 @@ export default function App() {
       questionsAnswered: totalAns,
       accuracy: newAccuracy
     });
+  };
+
+  // Handle moving to the next question of the currently selected difficulty
+  const goToNextMathQuestion = () => {
+    const list = topicMathQuestions[activeMathTopic] || [];
+    
+    // Find all indices of the current topic questions that match the selected mathDifficulty
+    const matchingIndices = list
+      .map((q, idx) => ({ q, idx }))
+      .filter(item => item.q.difficulty === mathDifficulty);
+
+    // Look for a matching question whose index is GREATER than currentTopicIndex
+    const nextItem = matchingIndices.find(item => item.idx > currentTopicIndex);
+
+    if (nextItem) {
+      setActiveMathQuestionIndex({
+        ...activeMathQuestionIndex,
+        [activeMathTopic]: nextItem.idx
+      });
+      setMathSelectedAnswer(null);
+      setMathAnswerSubmitted(false);
+    } else {
+      // No more cached questions of this difficulty further down. Let's see if there is any offline baseline question of this topic & difficulty we haven't seen yet.
+      const offlineBaselines = mockMathQuestions.filter(q => q.topic === activeMathTopic && q.difficulty === mathDifficulty);
+      const unusedBaseline = offlineBaselines.find(bq => !list.some(q => q.id === bq.id));
+
+      if (unusedBaseline) {
+        const updatedCatalog = { ...topicMathQuestions };
+        updatedCatalog[activeMathTopic] = [...(updatedCatalog[activeMathTopic] || []), unusedBaseline];
+        localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
+        setTopicMathQuestions(updatedCatalog);
+
+        setActiveMathQuestionIndex({
+          ...activeMathQuestionIndex,
+          [activeMathTopic]: updatedCatalog[activeMathTopic].length - 1
+        });
+        setMathSelectedAnswer(null);
+        setMathAnswerSubmitted(false);
+      } else {
+        // No match found anywhere, let's trigger a dynamic AI generation of the selected difficulty level!
+        generateNewMathQuestion();
+      }
+    }
   };
 
   // ---------------- CHATBOT / COGNITIVE TUTOR ENDPOINT ACTIONS ----------------
@@ -1330,8 +1429,16 @@ export default function App() {
           <div className="space-y-6">
             
             {/* Topic Progress Meters list */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              {(['algebra', 'arithmetic', 'word-problems', 'number-properties'] as const).map(topic => {
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {([
+                'algebra', 
+                'arithmetic', 
+                'word-problems', 
+                'number-properties', 
+                'rates-and-work', 
+                'ratios-and-percents', 
+                'statistics-and-data'
+              ] as const).map(topic => {
                 const isActive = activeMathTopic === topic;
                 const solved = mathCompletedCounts[topic] || 0;
                 const target = 50; // 40-50 questions target as requested by user
@@ -1348,16 +1455,16 @@ export default function App() {
                     className={`text-left p-4 rounded-2xl border transition-all duration-150 cursor-pointer ${isActive ? 'bg-white border-indigo-650 ring-2 ring-indigo-50 shadow-sm' : 'bg-white hover:bg-slate-100 border-slate-200'}`}
                   >
                     <div className="flex justify-between items-center text-[10px] font-mono text-slate-400 uppercase font-bold mb-1">
-                      <span>{topic.replace('-', ' ')}</span>
+                      <span className="truncate max-w-[120px]">{topic.replace(/-/g, ' ')}</span>
                       {percentage >= 100 ? (
-                        <span className="text-emerald-600 bg-emerald-50 px-1.5 rounded-full text-[9px]">Finished</span>
+                        <span className="text-emerald-600 bg-emerald-50 px-1.5 rounded-full text-[9px] shrink-0">Finished</span>
                       ) : (
-                        <span className="text-slate-400">{solved}/{target} done</span>
+                        <span className="text-slate-400 shrink-0">{solved}/{target} done</span>
                       )}
                     </div>
                     
-                    <h3 className="text-sm font-bold text-slate-800 leading-none capitalize mb-2">
-                      GMAT Focus: {topic.replace('-', ' ')}
+                    <h3 className="text-sm font-bold text-slate-800 leading-none capitalize mb-2 truncate">
+                      {topic.replace(/-/g, ' ')}
                     </h3>
 
                     {/* Completion progress bar */}
@@ -1389,32 +1496,88 @@ export default function App() {
               <div className="md:col-span-4 p-6 bg-slate-50/40 space-y-5 flex flex-col justify-between">
                 <div className="space-y-5">
                   <div className="space-y-1.5">
-                    <span className="text-[9px] uppercase font-mono text-slate-450 font-bold tracking-widest block">ACTIVE STUDY TOPIC</span>
-                    <h3 className="text-lg font-bold text-slate-900 capitalize font-display leading-tight">{activeMathTopic.replace('-', ' ')}</h3>
+                    <span className="text-[9px] uppercase font-mono text-slate-455 font-bold tracking-widest block">ACTIVE STUDY TOPIC</span>
+                    <h3 className="text-lg font-bold text-slate-900 capitalize font-display leading-tight">{activeMathTopic.replace(/-/g, ' ')}</h3>
                     <p className="text-xs text-slate-550 leading-relaxed">
-                      This progressive practice suite prepares students for GMAT Problem Solving questions ranging from easy to medium difficulty. Solved questions increment the completion metric to secure the 705-level baseline.
+                      Conforming strictly to the <strong>GMAT Focus Edition</strong> syllabus (all arithmetic and algebraic concepts, absolutely <em>no geometry</em>). Master core problem structures to secure a high-percentile breakthrough!
                     </p>
                   </div>
 
                   <hr className="border-slate-200" />
 
                   {/* Difficulty level selector */}
-                  <div className="space-y-2">
+                  <div className="space-y-3">
                     <span className="text-[9px] uppercase font-mono text-slate-455 font-bold tracking-widest block">MATH DIFFICULTY FILTER</span>
                     <div className="grid grid-cols-3 gap-1.5">
-                      {(['easy', 'medium', 'hard'] as const).map(diff => (
-                        <button
-                          key={diff}
-                          onClick={() => {
-                            setMathDifficulty(diff);
-                          }}
-                          className={`py-1.5 rounded-lg text-xs font-bold capitalize border transition-all cursor-pointer ${mathDifficulty === diff ? 'bg-indigo-650 text-white border-indigo-650' : 'bg-white border-slate-200 text-slate-650 hover:bg-slate-100'}`}
-                        >
-                          {diff}
-                        </button>
-                      ))}
+                      {(['easy', 'medium', 'hard'] as const).map(diff => {
+                        const isChosen = mathDifficulty === diff;
+                        return (
+                          <button
+                            key={diff}
+                            onClick={() => {
+                              setMathDifficulty(diff);
+                              // Smart catalog switching inside current active math topic
+                              const list = topicMathQuestions[activeMathTopic] || [];
+                              const matchedIdx = list.findIndex(q => q.difficulty === diff);
+                              if (matchedIdx !== -1) {
+                                setActiveMathQuestionIndex({
+                                  ...activeMathQuestionIndex,
+                                  [activeMathTopic]: matchedIdx
+                                });
+                              } else {
+                                // Try finding a baseline matching topic & difficulty
+                                const baselineMatchIdx = mockMathQuestions.findIndex(q => q.topic === activeMathTopic && q.difficulty === diff);
+                                if (baselineMatchIdx !== -1) {
+                                  const matchingQ = mockMathQuestions[baselineMatchIdx];
+                                  const updatedCatalog = { ...topicMathQuestions };
+                                  if (!updatedCatalog[activeMathTopic]) updatedCatalog[activeMathTopic] = [];
+                                  if (!updatedCatalog[activeMathTopic].some(x => x.id === matchingQ.id)) {
+                                    updatedCatalog[activeMathTopic] = [...updatedCatalog[activeMathTopic], matchingQ];
+                                    localStorage.setItem('gmat_math_catalog', JSON.stringify(updatedCatalog));
+                                    setTopicMathQuestions(updatedCatalog);
+                                  }
+                                  const newIdx = updatedCatalog[activeMathTopic].findIndex(x => x.id === matchingQ.id);
+                                  setActiveMathQuestionIndex({
+                                    ...activeMathQuestionIndex,
+                                    [activeMathTopic]: newIdx !== -1 ? newIdx : updatedCatalog[activeMathTopic].length - 1
+                                  });
+                                }
+                              }
+                              setMathSelectedAnswer(null);
+                              setMathAnswerSubmitted(false);
+                            }}
+                            className={`py-2 px-1 rounded-xl border transition-all cursor-pointer flex flex-col items-center justify-center gap-0.5 text-center ${isChosen ? 'bg-indigo-650 text-white border-indigo-650 shadow-sm ring-2 ring-indigo-50 font-bold' : 'bg-white border-slate-200 text-slate-655 hover:bg-slate-100'}`}
+                          >
+                            <span className="text-[11px] uppercase tracking-wide block font-extrabold">{diff}</span>
+                            <span className={`text-[9px] font-mono block ${isChosen ? 'text-indigo-200' : 'text-slate-400'}`}>
+                              {mathDifficultySolved[diff]} solved
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
-                    <span className="text-[10px] text-slate-400 leading-normal block italic">Highly recommended: master of easy &amp; medium is required before 705 hard breakthrough.</span>
+                    
+                    {/* Manual Difficulty counters adjuster */}
+                    <div className="flex items-center justify-between text-[10px] bg-white p-2 rounded-xl border border-slate-200/60 select-none">
+                      <span className="text-slate-450 font-mono font-bold uppercase tracking-wider text-[8px]">ADJUST {mathDifficulty}:</span>
+                      <div className="flex items-center gap-1">
+                        <div className="flex items-center bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5">
+                          <button 
+                            onClick={() => updateMathDifficultyCount(mathDifficulty, -1)} 
+                            className="hover:text-red-650 px-1 font-bold text-[10px] cursor-pointer"
+                            title={`Decrease ${mathDifficulty} solved count`}
+                          >-</button>
+                          <span className="font-bold text-slate-800 font-mono px-1.5">{mathDifficultySolved[mathDifficulty]}</span>
+                          <button 
+                            onClick={() => updateMathDifficultyCount(mathDifficulty, 1)} 
+                            className="hover:text-emerald-700 px-1 font-bold text-[10px] cursor-pointer"
+                            title={`Increase ${mathDifficulty} solved count`}
+                          >+</button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <span className="text-[10px] text-slate-400 leading-normal block italic">Highly recommended: complete 40+ easy and medium before scaling hard breakout. Solved questions update counts automatically.</span>
                   </div>
 
                   <hr className="border-slate-200" />
@@ -1570,6 +1733,19 @@ export default function App() {
                             </strong>
                             <p className="italic">{parseSimpleMarkdown(currentMathQ.strategy || "")}</p>
                           </div>
+                        </div>
+                      )}
+
+                      {/* Next Question primary action when evaluated */}
+                      {mathAnswerSubmitted && (
+                        <div className="mt-4 animate-slide">
+                          <button
+                            onClick={goToNextMathQuestion}
+                            className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm hover:shadow-md transition-all cursor-pointer animate-pulse"
+                          >
+                            <span>Advance to Next {mathDifficulty} Question</span>
+                            <ArrowRight className="w-4 h-4 text-white" />
+                          </button>
                         </div>
                       )}
 

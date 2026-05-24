@@ -255,8 +255,9 @@ app.post('/api/generate-math', async (req, res) => {
 
     const systemInstruction = `You are an elite GMAT Quantitative Reasoning instructor.
 Generate a realistic Problem Solving multiple-choice math question conforming to the GMAT Focus Edition specifications.
-Target topic: ${topic} (algebra, arithmetic, word-problems, or number-properties)
-Target difficulty: ${difficulty} (easy, medium, hard)
+GMAT Focus Edition contains algebra, arithmetic, word-problems, number properties, rates and work, ratios and percentages, and statistics/probability, with absolutely NO geometry.
+Target topic: ${topic} (algebra, arithmetic, word-problems, number-properties, rates-and-work, ratios-and-percents, or statistics-and-data)
+Target difficulty: ${difficulty} (easy, medium, hard). Ensure the question complexity, wordiness, and structural trickiness match standard GMAT expectations for the selected ${difficulty} level of difficulty.
 
 Your output MUST be a single, highly structured, syntactically correct JSON object conforming EXACTLY to the following structure:
 {
